@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>TrainLog</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--card2:#20242d;--text:#e8eaf0;--mute:#8b92a1;--accent:#ff5a36;--line:#2a2f3a}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Roboto,sans-serif}
+main{padding:16px 14px 100px;max-width:640px;margin:0 auto}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;background:none;border:0;color:var(--mute);padding:15px 2px;font-size:12.5px}
+nav button.on{color:var(--accent);font-weight:700}
+h1{font-size:22px;margin:4px 0 14px}
+h2{font-size:17px;margin:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:12px}
+.row{display:flex;align-items:center;gap:8px}
+.grow{flex:1;min-width:0}
+.mute{color:var(--mute);font-size:13px}
+.btn{background:var(--card2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:15px}
+.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.danger{color:#ff7a7a}
+.small{padding:6px 10px;font-size:13px}
+.full{width:100%}
+input,select{background:var(--card2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:16px;width:100%}
+.sets{display:grid;grid-template-columns:26px 1fr 1fr 40px;gap:6px;align-items:center;margin-top:10px}
+.sets .h{color:var(--mute);font-size:12px}
+.tap{cursor:pointer}
+.stat{display:flex;gap:10px;margin-bottom:12px}
+.stat div{flex:1;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px}
+.stat b{display:block;font-size:18px}
+.toast{position:fixed;bottom:84px;left:50%;transform:translateX(-50%);background:#000;color:#fff;padding:10px 16px;border-radius:20px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<main id="view"></main>
+<nav id="nav"></nav>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+const KEY = 'trainlog.data';
+const MUSCLES = ['Chest','Back','Shoulders','Biceps','Triceps','Quads','Hamstrings','Glutes','Calves','Abs','Other'];
+const TABS = [['train','Train'],['routines','Routines'],['exercises','Exercises'],['history','History'],['backup','Backup']];
+
+/* ---------- helpers ---------- */
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n >= 0 ? n : 0; };
+const fmtN = n => String(+n);
+const setStr = s => fmtN(s.kg) + ' kg × ' + s.reps;
+const fmtDate = iso => new Date(iso).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short', year:'numeric'});
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+/* ---------- data ---------- */
+function seed() {
+  const ex = [['Bench Press','Chest'],['Incline Dumbbell Press','Chest'],['Overhead Press','Shoulders'],
+    ['Lateral Raise','Shoulders'],['Triceps Pushdown','Triceps'],['Pull-up','Back'],['Barbell Row','Back'],
+    ['Lat Pulldown','Back'],['Barbell Curl','Biceps'],['Squat','Quads'],['Leg Press','Quads'],
+    ['Romanian Deadlift','Hamstrings'],['Leg Curl','Hamstrings'],['Standing Calf Raise','Calves']];
+  return { schema: 1, exercises: ex.map(([name, muscle]) => ({ id: uid(), name, muscle })),
+           routines: [], workouts: [], draft: null, lastExport: null };
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) {
+      const d = JSON.parse(raw);
+      return Object.assign({ schema: 1, exercises: [], routines: [], workouts: [], draft: null, lastExport: null }, d);
+    }
+  } catch (e) {}
+  return seed();
+}
+let db = load();
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(db)); }
+  catch (e) { toast('Could not save data on this device!'); }
+}
+
+const exById = id => db.exercises.find(e => e.id === id);
+const exName = id => { const e = exById(id); return e ? e.name : '(deleted)'; };
+const exSorted = () => db.exercises.slice().sort((a, b) => a.name.localeCompare(b.name));
+const exOptions = () => exSorted().map(e => `<option value="${e.id}">${esc(e.name)}</option>`).join('');
+const workoutsNewestFirst = () => db.workouts.slice().sort((a, b) => b.date.localeCompare(a.date));
+
+function history(exId) {
+  const out = [];
+  for (const w of workoutsNewestFirst())
+    for (const en of w.entries)
+      if (en.exId === exId) out.push({ date: w.date, routine: w.routine, sets: en.sets });
+  return out;
+}
+const lastSets = exId => { const h = history(exId); return h.length ? h[0].sets : null; };
+const prefill = id => {
+  const l = lastSets(id);
+  return l && l.length ? l.map(s => ({ kg: fmtN(s.kg), reps: String(s.reps) }))
+                       : [0, 1, 2].map(() => ({ kg: '', reps: '' }));
+};
+
+/* ---------- UI state ---------- */
+const ui = { tab: 'train', exId: null, edit: null };
+
+function spark(vals) {
+  if (vals.length < 2) return '';
+  const w = 300, h = 70, p = 8, mn = Math.min(...vals), mx = Math.max(...vals);
+  const x = i => p + i * (w - 2 * p) / (vals.length - 1);
+  const y = v => mx === mn ? h / 2 : h - p - (v - mn) * (h - 2 * p) / (mx - mn);
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:70px"><polyline points="${vals.map((v, i) => x(i) + ',' + y(v)).join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>${vals.map((v, i) => `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="var(--accent)"/>`).join('')}</svg>`;
+}
+
+/* ---------- views ---------- */
+function vTrain() {
+  if (db.draft) return vWorkout();
+  let h = '<h1>Train</h1>';
+  if (db.routines.length) {
+    h += db.routines.map(r => `<div class="card"><div class="row"><div class="grow"><h2>${esc(r.name)}</h2>
+      <div class="mute">${r.exerciseIds.length} exercises</div></div>
+      <button class="btn primary" data-act="start" data-id="${r.id}">Start</button></div></div>`).join('');
+  } else {
+    h += '<div class="card mute">No routines yet. Create one in the Routines tab, or start an empty workout below.</div>';
+  }
+  h += '<button class="btn full" data-act="start-empty">Start empty workout</button>';
+  const days = db.lastExport ? (Date.now() - new Date(db.lastExport)) / 864e5 : Infinity;
+  if (db.workouts.length >= 3 && days > 30)
+    h += '<div class="card mute" style="margin-top:14px">Tip: you have not made a backup in a while. Open the Backup tab to export your data.</div>';
+  return h;
+}
+
+function vWorkout() {
+  const d = db.draft;
+  let h = `<div class="row"><h1 class="grow">${esc(d.routine)}</h1><button class="btn small danger" data-act="cancel">Cancel</button></div>`;
+  h += d.items.map((it, i) => {
+    const last = lastSets(it.exId);
+    return `<div class="card">
+      <div class="row"><h2 class="grow">${esc(exName(it.exId))}</h2><button class="btn small danger" data-act="rm-item" data-i="${i}">✕</button></div>
+      <div class="mute">${last ? 'Last: ' + last.map(setStr).join(' · ') : 'No history yet'}</div>
+      <div class="sets"><span class="h">Set</span><span class="h">kg</span><span class="h">Reps</span><span></span>
+      ${it.sets.map((s, j) => `<span class="mute">${j + 1}</span>
+        <input type="text" inputmode="decimal" data-i="${i}" data-j="${j}" data-f="kg" value="${esc(s.kg)}" placeholder="kg">
+        <input type="text" inputmode="numeric" data-i="${i}" data-j="${j}" data-f="reps" value="${esc(s.reps)}" placeholder="reps">
+        <button class="btn small" data-act="rm-set" data-i="${i}" data-j="${j}">−</button>`).join('')}
+      </div>
+      <button class="btn small" style="margin-top:10px" data-act="add-set" data-i="${i}">+ Set</button></div>`;
+  }).join('');
+  h += `<div class="card"><div class="row"><select id="addEx" class="grow">${exOptions()}</select><button class="btn" data-act="add-item">Add exercise</button></div></div>`;
+  h += '<button class="btn primary full" style="padding:14px" data-act="finish">Finish workout</button>';
+  return h;
+}
+
+function vRoutines() {
+  if (ui.edit) return vRoutineEdit();
+  let h = '<div class="row"><h1 class="grow">Routines</h1><button class="btn primary small" data-act="new-routine">+ New</button></div>';
+  if (!db.routines.length) h += '<div class="card mute">No routines yet. Tap “+ New” to build one from your exercises.</div>';
+  h += db.routines.map(r => `<div class="card tap" data-act="edit-routine" data-id="${r.id}">
+    <h2>${esc(r.name)}</h2><div class="mute">${r.exerciseIds.map(exName).map(esc).join(' · ') || 'No exercises'}</div></div>`).join('');
+  return h;
+}
+
+function vRoutineEdit() {
+  const r = ui.edit;
+  let h = `<h1>${r.isNew ? 'New routine' : 'Edit routine'}</h1>
+    <div class="card"><input id="rname" type="text" placeholder="Routine name (e.g. Push Day)" value="${esc(r.name)}"></div>`;
+  h += r.exerciseIds.map((id, i) => `<div class="card"><div class="row">
+    <span class="mute">${i + 1}</span><div class="grow">${esc(exName(id))}</div>
+    <button class="btn small" data-act="r-up" data-i="${i}">↑</button>
+    <button class="btn small" data-act="r-down" data-i="${i}">↓</button>
+    <button class="btn small danger" data-act="r-rm" data-i="${i}">✕</button></div></div>`).join('');
+  h += `<div class="card"><div class="row"><select id="rAddEx" class="grow">${exOptions()}</select><button class="btn" data-act="r-add">Add</button></div></div>
+    <div class="row"><button class="btn primary grow" style="padding:14px" data-act="r-save">Save routine</button>
+    <button class="btn" style="padding:14px" data-act="r-cancel">Cancel</button></div>`;
+  if (!r.isNew) h += '<button class="btn danger full" style="margin-top:12px" data-act="r-del">Delete routine</button>';
+  return h;
+}
+
+function vExercises() {
+  if (ui.exId) return vExDetail();
+  let h = `<h1>Exercises</h1><div class="card">
+    <input id="newEx" type="text" placeholder="New exercise name">
+    <div class="row" style="margin-top:8px"><select id="newMuscle" class="grow">${MUSCLES.map(m => `<option>${m}</option>`).join('')}</select>
+    <button class="btn primary" data-act="add-ex">Add</button></div></div>`;
+  h += exSorted().map(e => `<div class="card tap" data-act="open-ex" data-id="${e.id}"><div class="row">
+    <div class="grow"><h2>${esc(e.name)}</h2><div class="mute">${esc(e.muscle || '')}</div></div>
+    <span class="mute">${history(e.id).length} sessions ›</span></div></div>`).join('');
+  return h;
+}
+
+function vExDetail() {
+  const e = exById(ui.exId);
+  if (!e) { ui.exId = null; return vExercises(); }
+  const hist = history(e.id);
+  const allSets = hist.flatMap(x => x.sets);
+  let best = null, bestRm = 0;
+  for (const s of allSets) {
+    if (!best || s.kg > best.kg || (s.kg === best.kg && s.reps > best.reps)) best = s;
+    bestRm = Math.max(bestRm, s.kg * (1 + s.reps / 30));
+  }
+  const topPerSession = hist.slice().reverse().map(x => Math.max(...x.sets.map(s => s.kg)));
+  let h = `<div class="row"><button class="btn small" data-act="back-ex">‹ Back</button><h1 class="grow" style="margin:0">${esc(e.name)}</h1></div>
+    <div class="mute" style="margin:6px 0 14px">${esc(e.muscle || '')}</div>
+    <div class="stat"><div><span class="mute">Sessions</span><b>${hist.length}</b></div>
+    <div><span class="mute">Best set</span><b>${best ? setStr(best) : '–'}</b></div>
+    <div><span class="mute">Est. 1RM</span><b>${bestRm ? fmtN(Math.round(bestRm * 10) / 10) + ' kg' : '–'}</b></div></div>`;
+  if (topPerSession.length > 1) h += `<div class="card"><div class="mute">Top weight per session</div>${spark(topPerSession)}</div>`;
+  h += hist.length ? hist.map(x => `<div class="card"><div class="row"><b class="grow">${fmtDate(x.date)}</b><span class="mute">${esc(x.routine)}</span></div>
+      <div class="mute" style="margin-top:4px">${x.sets.map(setStr).join(' · ')}</div></div>`).join('')
+    : '<div class="card mute">No history yet. Log this exercise in a workout and it will show up here.</div>';
+  h += `<div class="row" style="margin-top:6px"><button class="btn" data-act="rename-ex">Rename</button>
+    <button class="btn danger" data-act="del-ex">Delete</button></div>`;
+  return h;
+}
+
+function vHistory() {
+  const ws = workoutsNewestFirst();
+  let h = '<h1>History</h1>';
+  if (!ws.length) return h + '<div class="card mute">No workouts logged yet.</div>';
+  return h + ws.map(w => `<div class="card"><div class="row"><div class="grow"><b>${fmtDate(w.date)}</b>
+    <div class="mute">${esc(w.routine)}</div></div><button class="btn small danger" data-act="del-workout" data-id="${w.id}">Delete</button></div>
+    ${w.entries.map(en => `<div style="margin-top:8px"><div>${esc(exName(en.exId))}</div>
+      <div class="mute">${en.sets.map(setStr).join(' · ')}</div></div>`).join('')}</div>`).join('');
+}
+
+function vBackup() {
+  return `<h1>Backup</h1>
+    <div class="card"><p style="margin-top:0">Your data is stored only on this phone. Export a backup file now and then, and keep it somewhere safe (Drive, email to yourself, etc.).</p>
+    <button class="btn primary full" data-act="export">Export backup</button>
+    <div class="mute" style="margin-top:8px">Last export: ${db.lastExport ? fmtDate(db.lastExport) : 'never'}</div></div>
+    <div class="card"><p style="margin-top:0">Restore from a backup file. This replaces everything currently in the app.</p>
+    <input type="file" id="importFile" accept=".json,application/json"></div>
+    <div class="mute">${db.workouts.length} workouts · ${db.exercises.length} exercises · ${db.routines.length} routines · TrainLog v1.0</div>`;
+}
+
+/* ---------- render ---------- */
+function render(keepScroll = true) {
+  const y = window.scrollY;
+  document.getElementById('nav').innerHTML = TABS.map(([k, l]) =>
+    `<button data-tab="${k}" class="${ui.tab === k ? 'on' : ''}">${l}</button>`).join('');
+  const v = { train: vTrain, routines: vRoutines, exercises: vExercises, history: vHistory, backup: vBackup }[ui.tab];
+  document.getElementById('view').innerHTML = v();
+  window.scrollTo(0, keepScroll ? y : 0);
+}
+
+/* ---------- actions ---------- */
+function finishWorkout() {
+  const d = db.draft;
+  const entries = d.items.map(it => ({
+    exId: it.exId,
+    sets: it.sets.map(s => ({ kg: num(s.kg), reps: Math.round(num(s.reps)) })).filter(s => s.reps > 0)
+  })).filter(e => e.sets.length);
+  if (!entries.length) { toast('Log at least one set (reps) first'); return; }
+  db.workouts.push({ id: uid(), date: d.date, routine: d.routine, entries });
+  db.draft = null; save(); toast('Workout saved'); render(false);
+}
+
+function doExport() {
+  const out = { app: 'trainlog', schema: 1, exportedAt: new Date().toISOString(),
+                exercises: db.exercises, routines: db.routines, workouts: db.workouts };
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'trainlog-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  db.lastExport = new Date().toISOString(); save(); render();
+}
+
+const acts = {
+  'start': d => { const r = db.routines.find(x => x.id === d.id); if (!r) return;
+    db.draft = { routine: r.name, date: new Date().toISOString(),
+      items: r.exerciseIds.filter(exById).map(id => ({ exId: id, sets: prefill(id) })) };
+    save(); render(false); },
+  'start-empty': () => { db.draft = { routine: 'Workout', date: new Date().toISOString(), items: [] }; save(); render(false); },
+  'cancel': () => { if (confirm('Discard this workout?')) { db.draft = null; save(); render(false); } },
+  'rm-item': d => { db.draft.items.splice(+d.i, 1); save(); render(); },
+  'add-item': () => { const id = document.getElementById('addEx').value; if (!id) return;
+    db.draft.items.push({ exId: id, sets: prefill(id) }); save(); render(); },
+  'add-set': d => { const sets = db.draft.items[+d.i].sets; const p = sets[sets.length - 1];
+    sets.push({ kg: p ? p.kg : '', reps: p ? p.reps : '' }); save(); render(); },
+  'rm-set': d => { db.draft.items[+d.i].sets.splice(+d.j, 1); save(); render(); },
+  'finish': finishWorkout,
+
+  'new-routine': () => { ui.edit = { id: uid(), name: '', exerciseIds: [], isNew: true }; render(false); },
+  'edit-routine': d => { const r = db.routines.find(x => x.id === d.id);
+    ui.edit = { id: r.id, name: r.name, exerciseIds: r.exerciseIds.slice(), isNew: false }; render(false); },
+  'r-add': () => { const id = document.getElementById('rAddEx').value; if (id) { ui.edit.exerciseIds.push(id); render(); } },
+  'r-rm': d => { ui.edit.exerciseIds.splice(+d.i, 1); render(); },
+  'r-up': d => { const a = ui.edit.exerciseIds, i = +d.i; if (i > 0) { [a[i - 1], a[i]] = [a[i], a[i - 1]]; render(); } },
+  'r-down': d => { const a = ui.edit.exerciseIds, i = +d.i; if (i < a.length - 1) { [a[i + 1], a[i]] = [a[i], a[i + 1]]; render(); } },
+  'r-save': () => { const r = ui.edit; r.name = r.name.trim();
+    if (!r.name) { toast('Give the routine a name'); return; }
+    const rec = { id: r.id, name: r.name, exerciseIds: r.exerciseIds };
+    const i = db.routines.findIndex(x => x.id === r.id);
+    if (i >= 0) db.routines[i] = rec; else db.routines.push(rec);
+    ui.edit = null; save(); toast('Routine saved'); render(false); },
+  'r-cancel': () => { ui.edit = null; render(false); },
+  'r-del': () => { if (confirm('Delete this routine? Logged workouts are kept.')) {
+    db.routines = db.routines.filter(x => x.id !== ui.edit.id); ui.edit = null; save(); render(false); } },
+
+  'add-ex': () => { const el = document.getElementById('newEx'); const name = el.value.trim();
+    if (!name) { toast('Type an exercise name'); return; }
+    if (db.exercises.some(e => e.name.toLowerCase() === name.toLowerCase())) { toast('That exercise already exists'); return; }
+    db.exercises.push({ id: uid(), name, muscle: document.getElementById('newMuscle').value });
+    save(); render(); },
+  'open-ex': d => { ui.exId = d.id; render(false); },
+  'back-ex': () => { ui.exId = null; render(false); },
+  'rename-ex': () => { const e = exById(ui.exId); const n = prompt('Exercise name', e.name);
+    if (n && n.trim()) { e.name = n.trim(); save(); render(); } },
+  'del-ex': () => { const e = exById(ui.exId);
+    if (history(e.id).length) { toast('Has logged history, so it can not be deleted. Rename it instead.'); return; }
+    if (confirm('Delete "' + e.name + '"? It will also be removed from routines.')) {
+      db.exercises = db.exercises.filter(x => x.id !== e.id);
+      db.routines.forEach(r => r.exerciseIds = r.exerciseIds.filter(id => id !== e.id));
+      ui.exId = null; save(); render(false); } },
+
+  'del-workout': d => { if (confirm('Delete this workout from history?')) {
+    db.workouts = db.workouts.filter(w => w.id !== d.id); save(); render(); } },
+  'export': doExport
+};
+
+/* ---------- events ---------- */
+document.addEventListener('click', e => {
+  const tb = e.target.closest('[data-tab]');
+  if (tb) { ui.tab = tb.dataset.tab; ui.exId = null; ui.edit = null; render(false); return; }
+  const b = e.target.closest('[data-act]');
+  if (b && acts[b.dataset.act]) acts[b.dataset.act](b.dataset);
+});
+
+document.addEventListener('input', e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.f && db.draft) {
+    db.draft.items[+t.dataset.i].sets[+t.dataset.j][t.dataset.f] = t.value; save();
+  } else if (t.id === 'rname' && ui.edit) {
+    ui.edit.name = t.value;
+  }
+});
+
+document.addEventListener('change', e => {
+  if (e.target.id !== 'importFile') return;
+  const f = e.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const d = JSON.parse(reader.result);
+      if (!Array.isArray(d.exercises) || !Array.isArray(d.routines) || !Array.isArray(d.workouts)) throw new Error('bad');
+      if (!confirm('Replace ALL current data with this backup (' + d.workouts.length + ' workouts)?')) return;
+      db = { schema: 1, exercises: d.exercises, routines: d.routines, workouts: d.workouts, draft: null, lastExport: db.lastExport };
+      save(); toast('Backup restored'); render(false);
+    } catch (err) { toast('That is not a valid TrainLog backup'); }
+  };
+  reader.readAsText(f);
+});
+
+/* ---------- start ---------- */
+render(false);
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+try { if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js'); } catch (e) {}
+</script>
+</body>
+</html>
